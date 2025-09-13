@@ -1,3 +1,4 @@
+
 use nalgebra_glm::{Vec3, normalize};
 use minifb::{Key, Window, WindowOptions};
 use std::time::Duration;
@@ -5,128 +6,62 @@ use std::f32::consts::PI;
 
 mod framebuffer;
 mod ray_intersect;
-mod sphere; 
 mod color;
 mod camera;
-mod light;
 mod material;
+mod cube;
+mod texture;
 
 use framebuffer::Framebuffer;
-use sphere::Sphere;
-use color::Color;
 use ray_intersect::{Intersect, RayIntersect};
+use color::Color;
 use camera::Camera;
-use light::Light;
 use material::Material;
+use cube::Cube;
+use texture::Texture;
 
-const SHADOW_BIAS: f32 = 1e-4;
-
-fn reflect(incident: &Vec3, normal: &Vec3) -> Vec3 {
-    incident - 2.0 * incident.dot(normal) * normal
-}
-
-fn cast_shadow(
-    intersect: &Intersect,
-    light: &Light,
-    objects: &[Sphere],
-) -> f32 {
-    let light_dir = (light.position - intersect.point).normalize();
-    let light_distance = (light.position - intersect.point).magnitude();
-
-    let offset_normal = intersect.normal * SHADOW_BIAS;
-    let shadow_ray_origin = if light_dir.dot(&intersect.normal) < 0.0 {
-        intersect.point - offset_normal
-    } else {
-        intersect.point + offset_normal
-    };
-
-    let mut shadow_intensity = 0.0;
-
-    for object in objects {
-        let shadow_intersect = object.ray_intersect(&shadow_ray_origin, &light_dir);
-        if shadow_intersect.is_intersecting && shadow_intersect.distance < light_distance {
-            let distance_ratio = shadow_intersect.distance / light_distance;
-            shadow_intensity = 1.0 - distance_ratio.powf(2.0).min(1.0);
-            break;
-        }
-    }
-
-    shadow_intensity
-}
-
-pub fn cast_ray(
+fn cast_ray(
     ray_origin: &Vec3,
     ray_direction: &Vec3,
-    objects: &[Sphere],
-    light: &Light,
+    objects: &[Box<dyn RayIntersect>],
 ) -> Color {
-    let mut intersect = Intersect::empty();
+    let mut closest = Intersect::empty();
     let mut zbuffer = f32::INFINITY;
 
-    for object in objects {
-        let i = object.ray_intersect(ray_origin, ray_direction);
+    for obj in objects {
+        let i = obj.ray_intersect(ray_origin, ray_direction);
         if i.is_intersecting && i.distance < zbuffer {
             zbuffer = i.distance;
-            intersect = i;
+            closest = i;
         }
     }
 
-    if !intersect.is_intersecting {
-        // return default sky box color
-        return Color::new(4, 12, 36);
+    if !closest.is_intersecting {
+        return Color::new(20, 30, 40);
     }
 
-    let light_dir = (light.position - intersect.point).normalize();
-    let view_dir = (ray_origin - intersect.point).normalize();
-    let reflect_dir = reflect(&-light_dir, &intersect.normal);
-
-    let shadow_intensity = cast_shadow(&intersect, light, objects);
-    let light_intensity = light.intensity * (1.0 - shadow_intensity);
-
-    let diffuse_intensity = intersect.normal.dot(&light_dir).max(0.0).min(1.0);
-    let diffuse = intersect.material.diffuse * intersect.material.albedo[0] * diffuse_intensity * light_intensity;
-
-    let specular_intensity = view_dir.dot(&reflect_dir).max(0.0).powf(intersect.material.specular);
-    let specular = light.color * intersect.material.albedo[1] * specular_intensity * light_intensity;
-
-    diffuse + specular
+    closest.material.color_at(closest.u, closest.v)
 }
 
-pub fn render(framebuffer: &mut Framebuffer, objects: &[Sphere], camera: &Camera, light: &Light) {
+fn render(framebuffer: &mut Framebuffer, objects: &[Box<dyn RayIntersect>], camera: &Camera) {
     let width = framebuffer.width as f32;
     let height = framebuffer.height as f32;
     let aspect_ratio = width / height;
-    let fov = PI/3.0;
+    let fov = PI / 3.0;
     let perspective_scale = (fov * 0.5).tan();
-
-    // random number generator
-    // let mut rng = rand::thread_rng();
 
     for y in 0..framebuffer.height {
         for x in 0..framebuffer.width {
-            // if rng.gen_range(0.0..1.0) < 0.3 {
-            //     // we skip 30% of the points
-            //     continue;
-            // }
-
-            // Map the pixel coordinate to screen space [-1, 1]
             let screen_x = (2.0 * x as f32) / width - 1.0;
             let screen_y = -(2.0 * y as f32) / height + 1.0;
 
-            // Adjust for aspect ratio and perspective 
             let screen_x = screen_x * aspect_ratio * perspective_scale;
             let screen_y = screen_y * perspective_scale;
 
-            // Calculate the direction of the ray for this pixel
-            let ray_direction = normalize(&Vec3::new(screen_x, screen_y, -1.0));
+            let ray_dir = normalize(&Vec3::new(screen_x, screen_y, -1.0));
+            let ray_dir = camera.basis_change(&ray_dir);
 
-            // Apply camera rotation to the ray direction
-            let rotated_direction = camera.basis_change(&ray_direction);
-
-            // Cast the ray and get the pixel color
-            let pixel_color = cast_ray(&camera.eye, &rotated_direction, objects, light);
-
-            // Draw the pixel on screen with the returned color
+            let pixel_color = cast_ray(&camera.eye, &ray_dir, objects);
             framebuffer.set_current_color(pixel_color.to_hex());
             framebuffer.point(x, y);
         }
@@ -142,78 +77,63 @@ fn main() {
 
     let mut framebuffer = Framebuffer::new(framebuffer_width, framebuffer_height);
     let mut window = Window::new(
-        "Rust Graphics - Raytracer Example",
+        "Rust Graphics - Textured Cube (Free-Fly)",
         window_width,
         window_height,
         WindowOptions::default(),
     ).unwrap();
 
-    // move the window around
-    window.set_position(500, 500);
+    window.set_position(500, 300);
     window.update();
 
-    let rubber = Material::new(
-        Color::new(80, 0, 0),
-        1.0,
-        [0.9, 0.1],
-    );
-
-    let ivory = Material::new(
-        Color::new(100, 100, 80),
-        50.0,
-        [0.6, 0.3],
-    );
-
-    let objects = [
-        Sphere { center: Vec3::new(0.0, 0.0, 0.0), radius: 1.0, material: rubber },
-        Sphere { center: Vec3::new(0.0, 0.0, 1.5), radius: 0.5, material: ivory },
-        // Sphere { center: Vec3::new(1.0, 1.0, 3.0), radius: 0.7, material: rubber },
-        // Sphere { center: Vec3::new(-2.0, 2.0, -5.0), radius: 1.0, material: ivory },
-    ];
-
-    // Initialize camera
     let mut camera = Camera::new(
-        Vec3::new(0.0, 0.0, 5.0),  // eye: Initial camera position
-        Vec3::new(0.0, 0.0, 0.0),  // center: Point the camera is looking at (origin)
-        Vec3::new(0.0, 1.0, 0.0)   // up: World up vector
+        Vec3::new(0.0, 0.0, 3.0),
+        Vec3::new(0.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0)
     );
-    let rotation_speed = PI/50.0;
 
-    let light = Light::new(
-        Vec3::new(0.0, 0.0, 5.0),
-        Color::new(255, 255, 255),
-        1.0
+    let material = match Texture::from_file("assets/texture2.png") {
+        Ok(tex) => Material::from_texture(tex),
+        Err(_)  => Material::from_color(Color::new(200, 200, 220)),
+    };
+
+    let size = 2.0;
+    let half = size * 0.5;
+    let cube = Cube::new(
+        Vec3::new(-half, -half, -4.0 - half),
+        Vec3::new( half,  half, -4.0 + half),
+        material
     );
+
+    let objects: Vec<Box<dyn RayIntersect>> = vec![ Box::new(cube) ];
+
+    let mut move_speed = 0.08f32;
+    let yaw_speed = 0.03f32;
+    let pitch_speed = 0.03f32;
 
     while window.is_open() {
-        // listen to inputs
-        if window.is_key_down(Key::Escape) {
-            break;
+        if window.is_key_down(Key::Escape) { break; }
+
+        if window.is_key_down(Key::LeftShift) || window.is_key_down(Key::RightShift) {
+            move_speed = 0.16;
+        } else {
+            move_speed = 0.08;
         }
 
-        //  camera orbit controls
-        if window.is_key_down(Key::Left) {
-            camera.orbit(rotation_speed, 0.0);
-        }
-        if window.is_key_down(Key::Right) {
-            camera.orbit(-rotation_speed, 0.0);
-        }
-        if window.is_key_down(Key::Up) {
-            camera.orbit(0.0, -rotation_speed);
-        }
-        if window.is_key_down(Key::Down) {
-            camera.orbit(0.0, rotation_speed);
-        }
+        if window.is_key_down(Key::Left)  { camera.yaw_pitch( yaw_speed, 0.0); }
+        if window.is_key_down(Key::Right) { camera.yaw_pitch(-yaw_speed, 0.0); }
+        if window.is_key_down(Key::Up)    { camera.yaw_pitch(0.0,  pitch_speed); }
+        if window.is_key_down(Key::Down)  { camera.yaw_pitch(0.0, -pitch_speed); }
 
-        // draw some points
-        render(&mut framebuffer, &objects, &camera, &light);
+        if window.is_key_down(Key::W) { camera.move_local( move_speed, 0.0, 0.0); }
+        if window.is_key_down(Key::S) { camera.move_local(-move_speed, 0.0, 0.0); }
+        if window.is_key_down(Key::D) { camera.move_local(0.0,  move_speed, 0.0); }
+        if window.is_key_down(Key::A) { camera.move_local(0.0, -move_speed, 0.0); }
+        if window.is_key_down(Key::R) { camera.move_local(0.0, 0.0,  move_speed); }
+        if window.is_key_down(Key::F) { camera.move_local(0.0, 0.0, -move_speed); }
 
-
-        // update the window with the framebuffer contents
-        window
-            .update_with_buffer(&framebuffer.buffer, framebuffer_width, framebuffer_height)
-            .unwrap();
-
+        render(&mut framebuffer, &objects, &camera);
+        window.update_with_buffer(&framebuffer.buffer, framebuffer_width, framebuffer_height).unwrap();
         std::thread::sleep(frame_delay);
     }
 }
